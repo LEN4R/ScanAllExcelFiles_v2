@@ -12,294 +12,329 @@ namespace ExcelScannerWinForms
 {
     public partial class MainForm : Form
     {
+        private string lastResultFolder = "";
+
         public MainForm()
         {
             InitializeComponent();
             System.Text.Encoding.RegisterProvider(System.Text.CodePagesEncodingProvider.Instance);
 
-            // начальный размер окна
-            this.MinimumSize = new System.Drawing.Size(710, 280);
             this.FormBorderStyle = FormBorderStyle.FixedDialog;
             this.MaximizeBox = false;
 
-            progressBar.Visible = false;
-            lblStatus.Visible = false;
-            lblResultPath.Visible = false;
-            btnOpenFolder.Visible = false;
+            // стартовое состояние панелей
+            panelInput.Visible = true;
+            panelProgress.Visible = false;
+            panelResult.Visible = false;
 
-            this.Resize += MainForm_Resize;
-            UpdateFormHeight();
-        }
-
-        private void MainForm_Resize(object sender, EventArgs e)
-        {
-            // Растягиваем кнопки и прогресс-бар по ширине окна
-            int margin = 15;
-            btnStart.Width = this.ClientSize.Width - 2 * margin;
-            progressBar.Width = this.ClientSize.Width - 2 * margin;
-            lblResultPath.Width = this.ClientSize.Width - 2 * margin;
+            // события изменения размера
+            this.SizeChanged += (s, e) => UpdateLayout();
+            UpdateLayout();
         }
 
         private void btnBrowse_Click(object sender, EventArgs e)
         {
-            using (var dlg = new FolderBrowserDialog())
-            {
-                if (dlg.ShowDialog() == DialogResult.OK)
-                    txtFolder.Text = dlg.SelectedPath;
-            }
+            using var dlg = new FolderBrowserDialog();
+            if (dlg.ShowDialog() == DialogResult.OK)
+                txtFolder.Text = dlg.SelectedPath;
         }
 
         private async void btnStart_Click(object sender, EventArgs e)
         {
-            string rootFolder = txtFolder.Text;
+            string rootFolder = txtFolder.Text.Trim();
             if (!Directory.Exists(rootFolder))
             {
-                MessageBox.Show("Папка не найдена!");
+                MessageBox.Show("Папка не найдена!", "Ошибка", MessageBoxButtons.OK, MessageBoxIcon.Warning);
                 return;
             }
 
             var sheetNameFilter = txtSheet.Text.Trim();
 
-            // Обработка ячеек
             List<string> targetCells;
             try
             {
                 targetCells = ParseCells(txtCells.Text.Trim());
+                if (targetCells.Count == 0)
+                    throw new Exception("Не указаны ячейки.");
             }
-            catch
+            catch (Exception ex)
             {
-                MessageBox.Show("Ошибка в формате ячеек.");
+                MessageBox.Show("Ошибка в формате ячеек: " + ex.Message, "Ошибка", MessageBoxButtons.OK, MessageBoxIcon.Warning);
                 return;
             }
 
-            // Подготовка интерфейса
-            btnStart.Visible = false;
-            lblStatus.Visible = true;
-            progressBar.Visible = true;
-            lblResultPath.Visible = false;
-            btnOpenFolder.Visible = false;
-            lblStatus.Text = "Сканирование...";
-            UpdateFormHeight();
-
-            var results = new List<List<string>>();
-            var errors = new List<List<string>>();
-
-            // Заголовки
-            var header = new List<string> { "Файл (относительный путь)", "Уровень папки", "Имя файла", "Имя листа" };
-            header.AddRange(targetCells);
-            results.Add(header);
-            errors.Add(new List<string> { "Файл (относительный путь)", "Имя файла", "Описание ошибки" });
-
-            // Получаем файлы
             var excelFiles = Directory.GetFiles(rootFolder, "*.*", SearchOption.AllDirectories)
-                                      .Where(f => f.EndsWith(".xlsx", StringComparison.OrdinalIgnoreCase)
-                                               || f.EndsWith(".xlsm", StringComparison.OrdinalIgnoreCase)
-                                               || f.EndsWith(".xlsb", StringComparison.OrdinalIgnoreCase))
-                                      .ToList();
+                .Where(f => f.EndsWith(".xlsx", StringComparison.OrdinalIgnoreCase)
+                         || f.EndsWith(".xlsm", StringComparison.OrdinalIgnoreCase)
+                         || f.EndsWith(".xlsb", StringComparison.OrdinalIgnoreCase))
+                .ToList();
 
-            int total = excelFiles.Count;
-            int current = 0;
-
-            foreach (var file in excelFiles)
+            if (excelFiles.Count == 0)
             {
-                current++;
-                lblStatus.Text = $"Сканирование {current}/{total}";
-                progressBar.Maximum = total;
-                progressBar.Value = current;
-                Application.DoEvents(); // обновляем UI
+                MessageBox.Show("Не найдено Excel файлов в выбранной папке.", "Инфо", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                return;
+            }
 
-                if (Path.GetFileName(file).StartsWith("~$"))
-                    continue;
+            panelInput.Visible = false;
+            panelProgress.Visible = true;
+            panelResult.Visible = false;
+            lblStatus.Text = "Подготовка...";
+            progressBar.Value = 0;
+            progressBar.Maximum = Math.Max(1, excelFiles.Count);
+            UpdateLayout();
 
+            var progress = new Progress<int>(value =>
+            {
+                lblStatus.Text = $"Сканирование {value}/{excelFiles.Count}";
+                progressBar.Value = Math.Clamp(value, progressBar.Minimum, progressBar.Maximum);
+            });
+
+            string resultFilePath = null;
+            Exception backgroundException = null;
+
+            await Task.Run(() =>
+            {
                 try
                 {
-                    if (file.EndsWith(".xlsb", StringComparison.OrdinalIgnoreCase))
-                        ReadXlsbFile(file, sheetNameFilter, targetCells, rootFolder, results);
-                    else
-                        ReadXlsxFile(file, sheetNameFilter, targetCells, rootFolder, results);
-                }
-                catch (HeaderException hex)
-                {
-                    errors.Add(new List<string>
+                    var results = new List<List<string>>();
+                    var errors = new List<List<string>>();
+
+                    var header = new List<string> { "Файл (относительный путь)", "Уровень папки", "Имя файла", "Имя листа" };
+                    header.AddRange(targetCells);
+                    results.Add(header);
+                    errors.Add(new List<string> { "Файл (относительный путь)", "Имя файла", "Описание ошибки" });
+
+                    int current = 0;
+                    foreach (var file in excelFiles)
                     {
-                        Path.GetRelativePath(rootFolder, file),
-                        Path.GetFileName(file),
-                        $"Файл зашифрован или повреждён: {hex.Message}"
-                    });
+                        current++;
+                        (progress as IProgress<int>).Report(current);
+
+                        if (Path.GetFileName(file).StartsWith("~$"))
+                            continue;
+
+                        try
+                        {
+                            if (file.EndsWith(".xlsb", StringComparison.OrdinalIgnoreCase))
+                                ReadXlsbFile(file, sheetNameFilter, targetCells, rootFolder, results);
+                            else
+                                ReadXlsxFile(file, sheetNameFilter, targetCells, rootFolder, results);
+                        }
+                        catch (HeaderException hex)
+                        {
+                            errors.Add(new List<string>
+                            {
+                                Path.GetRelativePath(rootFolder, file),
+                                Path.GetFileName(file),
+                                $"Файл зашифрован или повреждён: {hex.Message}"
+                            });
+                        }
+                        catch (Exception ex)
+                        {
+                            errors.Add(new List<string>
+                            {
+                                Path.GetRelativePath(rootFolder, file),
+                                Path.GetFileName(file),
+                                ex.Message
+                            });
+                        }
+                    }
+
+                    string timestamp = DateTime.Now.ToString("yyyy.MM.dd HH-mm");
+                    string resultFileName = $"{timestamp} Result.xlsx";
+                    resultFilePath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, resultFileName);
+
+                    using var workbook = new XLWorkbook();
+                    var ws1 = workbook.Worksheets.Add("Собранные данные");
+                    WriteSheet(ws1, results);
+
+                    var ws2 = workbook.Worksheets.Add("Ошибки");
+                    WriteSheet(ws2, errors);
+
+                    workbook.SaveAs(resultFilePath);
                 }
                 catch (Exception ex)
                 {
-                    errors.Add(new List<string>
-                    {
-                        Path.GetRelativePath(rootFolder, file),
-                        Path.GetFileName(file),
-                        ex.Message
-                    });
+                    backgroundException = ex;
                 }
+            });
 
-                await Task.Delay(1); // для плавности UI
-            }
-
-            // Сохраняем результат
-            string timestamp = DateTime.Now.ToString("yyyy.MM.dd HH-mm");
-            string resultFileName = $"{timestamp} Result.xlsx";
-            string resultFilePath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, resultFileName);
-
-            using (var workbook = new XLWorkbook())
+            if (backgroundException != null)
             {
-                var ws1 = workbook.Worksheets.Add("Собранные данные");
-                WriteSheet(ws1, results);
-
-                var ws2 = workbook.Worksheets.Add("Ошибки");
-                WriteSheet(ws2, errors);
-
-                workbook.SaveAs(resultFilePath);
+                MessageBox.Show("Ошибка при сканировании: " + backgroundException.Message, "Ошибка", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                panelProgress.Visible = false;
+                panelInput.Visible = true;
+                UpdateLayout();
+                return;
             }
 
-            // Завершение сканирования
-            progressBar.Visible = false;
-            lblStatus.Text = "✅ Сканирование выполнено!";
-            lblResultPath.Text = resultFilePath;
-            lblResultPath.Visible = true;
-            btnOpenFolder.Visible = true;
-
-            // Расположение результата
-            int margin = 15;
-            lblResultPath.Top = progressBar.Visible ? progressBar.Bottom + 10 : txtCells.Bottom + 10;
-            lblResultPath.Left = margin;
-            btnOpenFolder.Top = lblResultPath.Bottom + 5;
-            btnOpenFolder.Left = margin;
-
-            UpdateFormHeight();
+            lastResultFolder = resultFilePath != null ? Path.GetDirectoryName(resultFilePath) : "";
+            panelProgress.Visible = false;
+            panelResult.Visible = true;
+            lblFinished.Text = "✅ Сканирование завершено!";
+            rtbFooter.Text = "\n\n(c) Галиев Ленар\nИсходный код: https://github.com/LEN4R/ScanAllExcelFiles_v2";
+            UpdateLayout();
         }
 
         private void btnOpenFolder_Click(object sender, EventArgs e)
         {
-            string folder = Path.GetDirectoryName(lblResultPath.Text);
-            if (Directory.Exists(folder))
-                System.Diagnostics.Process.Start("explorer.exe", folder);
+            if (!string.IsNullOrEmpty(lastResultFolder) && Directory.Exists(lastResultFolder))
+                System.Diagnostics.Process.Start("explorer.exe", lastResultFolder);
+            else
+                MessageBox.Show("Папка результата не найдена.", "Инфо", MessageBoxButtons.OK, MessageBoxIcon.Information);
         }
 
-        // ===================== Динамический размер формы =====================
-        private void UpdateFormHeight()
+        private void btnRestart_Click(object sender, EventArgs e)
         {
-            int baseHeight = txtCells.Bottom + 20; // после полей ввода
-            int progressHeight = progressBar.Visible ? progressBar.Height + 10 : 0;
-            int resultHeight = (lblResultPath.Visible || btnOpenFolder.Visible) ? lblResultPath.Height + btnOpenFolder.Height + 20 : 0;
-            this.Height = baseHeight + progressHeight + resultHeight;
+            txtFolder.Text = "";
+            txtSheet.Text = "";
+            txtCells.Text = "";
+            panelResult.Visible = false;
+            panelProgress.Visible = false;
+            panelInput.Visible = true;
+            UpdateLayout();
         }
 
-        // ===================== Парсинг ячеек =====================
+        private void UpdateLayout()
+        {
+            var margin = 15;
+
+            // Центровка прогресса
+            progressBar.Width = Math.Min(520, panelProgress.ClientSize.Width - margin * 2);
+            progressBar.Left = (panelProgress.ClientSize.Width - progressBar.Width) / 2;
+            lblStatus.Left = (panelProgress.ClientSize.Width - lblStatus.Width) / 2;
+
+            // Центровка кнопок в результат
+            int spacing = 12;
+            int totalButtonsWidth = btnOpenFolder.Width + spacing + btnRestart.Width;
+            int startX = (panelResult.ClientSize.Width - totalButtonsWidth) / 2;
+            btnOpenFolder.Left = startX;
+            btnRestart.Left = btnOpenFolder.Right + spacing;
+
+            // Высота формы
+            int baseHeight = panelInput.Visible ? panelInput.PreferredSize.Height : txtCells.Bottom + 40;
+            int progressExtra = panelProgress.Visible ? progressBar.Height + lblStatus.Height + 50 : 0;
+            int resultExtra = panelResult.Visible ? btnOpenFolder.Height + rtbFooter.Height + 60 : 0;
+
+            int targetHeight = Math.Max(this.MinimumSize.Height, baseHeight + progressExtra + resultExtra);
+            this.Height = targetHeight;
+        }
+
+        // === Парсинг ячеек ===
         private List<string> ParseCells(string input)
         {
             var result = new List<string>();
-            var parts = input.Split(',', StringSplitOptions.RemoveEmptyEntries);
-            foreach (var p in parts)
-            {
-                if (p.Contains("-"))
-                {
-                    var range = p.Split('-');
-                    string start = range[0].Trim();
-                    string end = range[1].Trim();
-                    int row = GetRowNumber(start);
-                    int startCol = ColLetterToIndex(GetColumnLetters(start));
-                    int endCol = ColLetterToIndex(GetColumnLetters(end));
+            if (string.IsNullOrWhiteSpace(input)) return result;
 
-                    for (int c = startCol; c <= endCol; c++)
-                        result.Add(ColumnIndexToLetter(c) + row);
+            var parts = input.Split(',', StringSplitOptions.RemoveEmptyEntries);
+            foreach (var raw in parts.Select(p => p.Trim()))
+            {
+                if (string.IsNullOrEmpty(raw)) continue;
+                if (raw.Contains('-'))
+                {
+                    var rangeParts = raw.Split('-', StringSplitOptions.RemoveEmptyEntries);
+                    if (rangeParts.Length != 2) throw new Exception($"Неверный диапазон: {raw}");
+                    string start = rangeParts[0].Trim();
+                    string end = rangeParts[1].Trim();
+
+                    string startCol = GetColumnLetters(start);
+                    string endCol = GetColumnLetters(end);
+                    int rowStart = GetRowNumber(start);
+                    int rowEnd = GetRowNumber(end);
+                    if (rowStart != rowEnd) throw new Exception($"В диапазоне строки должны совпадать: {raw}");
+
+                    int colStart = ColLetterToIndex(startCol);
+                    int colEnd = ColLetterToIndex(endCol);
+                    if (colStart > colEnd) (colStart, colEnd) = (colEnd, colStart);
+
+                    for (int c = colStart; c <= colEnd; c++)
+                        result.Add(ColumnIndexToLetter(c) + rowStart);
                 }
                 else
                 {
-                    result.Add(p.Trim());
+                    result.Add(raw);
                 }
             }
             return result;
         }
 
-        // ===================== Чтение Excel =====================
+        // === Чтение XLSX/XLSB ===
         private void ReadXlsxFile(string file, string sheetNameFilter, List<string> targetCells, string rootFolder, List<List<string>> results)
         {
-            using (var stream = new FileStream(file, FileMode.Open, FileAccess.Read, FileShare.ReadWrite))
-            using (var workbook = new XLWorkbook(stream))
+            using var stream = new FileStream(file, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
+            using var workbook = new XLWorkbook(stream);
+            var sheetsToScan = string.IsNullOrEmpty(sheetNameFilter)
+                ? workbook.Worksheets.ToList()
+                : workbook.Worksheets.Where(s => s.Name.Equals(sheetNameFilter, StringComparison.OrdinalIgnoreCase)).ToList();
+
+            if (!sheetsToScan.Any())
+                throw new Exception($"Лист '{sheetNameFilter}' не найден в {Path.GetFileName(file)}");
+
+            foreach (var ws in sheetsToScan)
             {
-                var sheetsToScan = string.IsNullOrEmpty(sheetNameFilter)
-                    ? workbook.Worksheets.ToList()
-                    : workbook.Worksheets
-                              .Where(s => s.Name.Equals(sheetNameFilter, StringComparison.OrdinalIgnoreCase))
-                              .ToList();
+                string relativePath = Path.GetRelativePath(rootFolder, file);
+                string fileNameOnly = Path.GetFileNameWithoutExtension(file);
+                int level = relativePath.Split(Path.DirectorySeparatorChar).Length - 1;
+                var row = new List<string> { relativePath, level.ToString(), fileNameOnly, ws.Name };
 
-                if (!sheetsToScan.Any())
-                    throw new Exception($"Лист '{sheetNameFilter}' не найден");
-
-                foreach (var ws in sheetsToScan)
+                foreach (var addr in targetCells)
                 {
-                    string relativePath = Path.GetRelativePath(rootFolder, file);
-                    string fileNameOnly = Path.GetFileNameWithoutExtension(file);
-                    int level = relativePath.Split(Path.DirectorySeparatorChar).Length - 1;
-                    var row = new List<string> { relativePath, level.ToString(), fileNameOnly, ws.Name };
-
-                    foreach (var addr in targetCells)
-                    {
-                        string value;
-                        try { value = ws.Cell(addr).GetFormattedString(); }
-                        catch { value = ""; }
-                        row.Add(value);
-                    }
-                    results.Add(row);
+                    string value;
+                    try { value = ws.Cell(addr).GetFormattedString(); }
+                    catch { value = ""; }
+                    row.Add(value);
                 }
+                results.Add(row);
             }
         }
 
         private void ReadXlsbFile(string file, string sheetNameFilter, List<string> targetCells, string rootFolder, List<List<string>> results)
         {
-            using (var stream = File.Open(file, FileMode.Open, FileAccess.Read, FileShare.ReadWrite))
-            using (var reader = ExcelReaderFactory.CreateReader(stream))
+            using var stream = File.Open(file, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
+            using var reader = ExcelReaderFactory.CreateReader(stream);
+            do
             {
-                do
+                string sheetName = reader.Name ?? $"Лист{Guid.NewGuid()}";
+                if (!string.IsNullOrEmpty(sheetNameFilter) &&
+                    !sheetName.Equals(sheetNameFilter, StringComparison.OrdinalIgnoreCase))
+                    continue;
+
+                var sheetData = new List<object[]>();
+                while (reader.Read())
                 {
-                    string sheetName = reader.Name ?? $"Лист{Guid.NewGuid()}";
-                    if (!string.IsNullOrEmpty(sheetNameFilter) &&
-                        !sheetName.Equals(sheetNameFilter, StringComparison.OrdinalIgnoreCase))
-                        continue;
+                    var values = new object[reader.FieldCount];
+                    reader.GetValues(values);
+                    sheetData.Add(values);
+                }
 
-                    var sheetData = new List<object[]>();
-                    while (reader.Read())
+                string relativePath = Path.GetRelativePath(rootFolder, file);
+                string fileNameOnly = Path.GetFileNameWithoutExtension(file);
+                int level = relativePath.Split(Path.DirectorySeparatorChar).Length - 1;
+                var row = new List<string> { relativePath, level.ToString(), fileNameOnly, sheetName };
+
+                foreach (var addr in targetCells)
+                {
+                    string value = "";
+                    try
                     {
-                        var values = new object[reader.FieldCount];
-                        reader.GetValues(values);
-                        sheetData.Add(values);
-                    }
-
-                    string relativePath = Path.GetRelativePath(rootFolder, file);
-                    string fileNameOnly = Path.GetFileNameWithoutExtension(file);
-                    int level = relativePath.Split(Path.DirectorySeparatorChar).Length - 1;
-                    var row = new List<string> { relativePath, level.ToString(), fileNameOnly, sheetName };
-
-                    foreach (var addr in targetCells)
-                    {
-                        string value = "";
-                        try
+                        int col = ColLetterToIndex(GetColumnLetters(addr));
+                        int r = GetRowNumber(addr) - 1;
+                        if (r >= 0 && r < sheetData.Count)
                         {
-                            int col = ColLetterToIndex(GetColumnLetters(addr));
-                            int r = GetRowNumber(addr) - 1;
-                            if (r >= 0 && r < sheetData.Count)
-                            {
-                                var line = sheetData[r];
-                                if (col >= 0 && col < line.Length)
-                                    value = line[col]?.ToString() ?? "";
-                            }
+                            var line = sheetData[r];
+                            if (col >= 0 && col < line.Length)
+                                value = line[col]?.ToString() ?? "";
                         }
-                        catch { }
-                        row.Add(value);
                     }
+                    catch { }
+                    row.Add(value);
+                }
 
-                    results.Add(row);
+                results.Add(row);
 
-                } while (reader.NextResult());
-            }
+            } while (reader.NextResult());
         }
 
-        // ===================== Сохранение в Excel =====================
         private void WriteSheet(IXLWorksheet ws, List<List<string>> data)
         {
             for (int i = 0; i < data.Count; i++)
@@ -310,7 +345,7 @@ namespace ExcelScannerWinForms
             ws.Columns().AdjustToContents();
         }
 
-        // ===================== Вспомогательные методы =====================
+        // === Вспомогательные ===
         private string GetColumnLetters(string cellAddress) => new string(cellAddress.Where(char.IsLetter).ToArray());
 
         private int GetRowNumber(string cellAddress)
