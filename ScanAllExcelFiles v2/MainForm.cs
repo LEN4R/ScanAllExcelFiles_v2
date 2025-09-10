@@ -5,6 +5,7 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using System.Text.RegularExpressions;
 using System.Threading.Tasks;
 using System.Windows.Forms;
 
@@ -142,7 +143,10 @@ namespace ExcelScannerWinForms
 
                     string timestamp = DateTime.Now.ToString("yyyy.MM.dd HH-mm");
                     string resultFileName = $"{timestamp} Result.xlsx";
-                    resultFilePath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, resultFileName);
+
+                    // ==== Исправление пути для single-file ====
+                    string exeDir = Path.GetDirectoryName(System.Diagnostics.Process.GetCurrentProcess().MainModule.FileName);
+                    resultFilePath = Path.Combine(exeDir, resultFileName);
 
                     using var workbook = new XLWorkbook();
                     var ws1 = workbook.Worksheets.Add("Собранные данные");
@@ -220,22 +224,27 @@ namespace ExcelScannerWinForms
             this.Height = targetHeight;
         }
 
-        // === Парсинг ячеек ===
+        // === Парсинг ячеек с защитой от дурака ===
         private List<string> ParseCells(string input)
         {
             var result = new List<string>();
             if (string.IsNullOrWhiteSpace(input)) return result;
 
             var parts = input.Split(',', StringSplitOptions.RemoveEmptyEntries);
+            var regexCell = new Regex(@"^[A-Za-z]+[0-9]+$", RegexOptions.Compiled); // буквы+цифры
             foreach (var raw in parts.Select(p => p.Trim()))
             {
                 if (string.IsNullOrEmpty(raw)) continue;
+
                 if (raw.Contains('-'))
                 {
                     var rangeParts = raw.Split('-', StringSplitOptions.RemoveEmptyEntries);
                     if (rangeParts.Length != 2) throw new Exception($"Неверный диапазон: {raw}");
                     string start = rangeParts[0].Trim();
                     string end = rangeParts[1].Trim();
+
+                    if (!regexCell.IsMatch(start) || !regexCell.IsMatch(end))
+                        throw new Exception($"Диапазон должен содержать только английские буквы и цифры: {raw}");
 
                     string startCol = GetColumnLetters(start);
                     string endCol = GetColumnLetters(end);
@@ -252,9 +261,12 @@ namespace ExcelScannerWinForms
                 }
                 else
                 {
+                    if (!regexCell.IsMatch(raw))
+                        throw new Exception($"Ячейка должна содержать только английские буквы и цифры и начинаться с буквы: {raw}");
                     result.Add(raw);
                 }
             }
+
             return result;
         }
 
