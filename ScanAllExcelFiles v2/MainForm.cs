@@ -23,12 +23,10 @@ namespace ExcelScannerWinForms
             this.FormBorderStyle = FormBorderStyle.FixedDialog;
             this.MaximizeBox = false;
 
-            // стартовое состояние панелей
             panelInput.Visible = true;
             panelProgress.Visible = false;
             panelResult.Visible = false;
 
-            // события изменения размера
             this.SizeChanged += (s, e) => UpdateLayout();
             UpdateLayout();
         }
@@ -67,7 +65,8 @@ namespace ExcelScannerWinForms
             var excelFiles = Directory.GetFiles(rootFolder, "*.*", SearchOption.AllDirectories)
                 .Where(f => f.EndsWith(".xlsx", StringComparison.OrdinalIgnoreCase)
                          || f.EndsWith(".xlsm", StringComparison.OrdinalIgnoreCase)
-                         || f.EndsWith(".xlsb", StringComparison.OrdinalIgnoreCase))
+                         || f.EndsWith(".xlsb", StringComparison.OrdinalIgnoreCase)
+                         || f.EndsWith(".xls", StringComparison.OrdinalIgnoreCase))
                 .ToList();
 
             if (excelFiles.Count == 0)
@@ -115,24 +114,33 @@ namespace ExcelScannerWinForms
                             continue;
                         try
                         {
-                            ReadExcelFile(file, sheetNameFilter, targetCells, rootFolder, results);
+                            bool sheetFound = ReadExcelFile(file, sheetNameFilter, targetCells, rootFolder, results);
+                            if (!sheetFound)
+                            {
+                                errors.Add(new List<object>
+                                {
+                                    Path.GetRelativePath(rootFolder, file),
+                                    Path.GetFileName(file),
+                                    $"Не найден лист \"{sheetNameFilter}\""
+                                });
+                            }
                         }
                         catch (HeaderException hex)
                         {
                             errors.Add(new List<object>
                             {
-                                    Path.GetRelativePath(rootFolder, file),
-                                    Path.GetFileName(file),
-                                    $"Файл зашифрован или повреждён: {hex.Message}"
+                                Path.GetRelativePath(rootFolder, file),
+                                Path.GetFileName(file),
+                                "Файл зашифрован или повреждён"
                             });
                         }
                         catch (Exception ex)
                         {
                             errors.Add(new List<object>
                             {
-                                    Path.GetRelativePath(rootFolder, file),
-                                    Path.GetFileName(file),
-                                    ex.Message
+                                Path.GetRelativePath(rootFolder, file),
+                                Path.GetFileName(file),
+                                ex.Message
                             });
                         }
                     }
@@ -140,7 +148,6 @@ namespace ExcelScannerWinForms
                     string timestamp = DateTime.Now.ToString("yyyy.MM.dd HH-mm");
                     string resultFileName = $"{timestamp} Result.xlsx";
 
-                    // ==== Исправление пути для single-file ====
                     string exeDir = Path.GetDirectoryName(System.Diagnostics.Process.GetCurrentProcess().MainModule.FileName);
                     resultFilePath = Path.Combine(exeDir, resultFileName);
 
@@ -199,19 +206,16 @@ namespace ExcelScannerWinForms
         {
             var margin = 15;
 
-            // Центровка прогресса
             progressBar.Width = Math.Min(520, panelProgress.ClientSize.Width - margin * 2);
             progressBar.Left = (panelProgress.ClientSize.Width - progressBar.Width) / 2;
             lblStatus.Left = (panelProgress.ClientSize.Width - lblStatus.Width) / 2;
 
-            // Центровка кнопок в результат
             int spacing = 12;
             int totalButtonsWidth = btnOpenFolder.Width + spacing + btnRestart.Width;
             int startX = (panelResult.ClientSize.Width - totalButtonsWidth) / 2;
             btnOpenFolder.Left = startX;
             btnRestart.Left = btnOpenFolder.Right + spacing;
 
-            // Высота формы
             int baseHeight = panelInput.Visible ? panelInput.PreferredSize.Height : txtCells.Bottom + 40;
             int progressExtra = panelProgress.Visible ? progressBar.Height + lblStatus.Height + 50 : 0;
             int resultExtra = panelResult.Visible ? btnOpenFolder.Height + rtbFooter.Height + 60 : 0;
@@ -220,14 +224,14 @@ namespace ExcelScannerWinForms
             this.Height = targetHeight;
         }
 
-        // === Парсинг ячеек с защитой от дурака ===
+        // === Парсинг ячеек ===
         private List<string> ParseCells(string input)
         {
             var result = new List<string>();
             if (string.IsNullOrWhiteSpace(input)) return result;
 
             var parts = input.Split(',', StringSplitOptions.RemoveEmptyEntries);
-            var regexCell = new Regex(@"^[A-Za-z]+[0-9]+$", RegexOptions.Compiled); // буквы+цифры
+            var regexCell = new Regex(@"^[A-Za-z]+[0-9]+$", RegexOptions.Compiled);
             foreach (var raw in parts.Select(p => p.Trim()))
             {
                 if (string.IsNullOrEmpty(raw)) continue;
@@ -266,9 +270,60 @@ namespace ExcelScannerWinForms
             return result;
         }
 
-        // === Чтение Excel ===
-        private void ReadExcelFile(string file, string sheetNameFilter, List<string> targetCells, string rootFolder, List<List<object>> results)
+        // === Универсальное чтение Excel через ExcelDataReader ===
+        //private void ReadExcelFile(string file, string sheetNameFilter, List<string> targetCells, string rootFolder, List<List<object>> results)
+        //{
+        //    using var stream = File.Open(file, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
+        //    using var reader = ExcelReaderFactory.CreateReader(stream);
+
+        //    do
+        //    {
+        //        string sheetName = reader.Name ?? $"Лист{Guid.NewGuid()}";
+        //        if (!string.IsNullOrEmpty(sheetNameFilter) &&
+        //            !sheetName.Equals(sheetNameFilter, StringComparison.OrdinalIgnoreCase))
+        //            continue;
+
+        //        var sheetData = new List<object[]>();
+        //        while (reader.Read())
+        //        {
+        //            var values = new object[reader.FieldCount];
+        //            reader.GetValues(values);
+        //            sheetData.Add(values);
+        //        }
+
+        //        string relativePath = Path.GetRelativePath(rootFolder, file);
+        //        string fileNameOnly = Path.GetFileNameWithoutExtension(file);
+        //        int level = relativePath.Split(Path.DirectorySeparatorChar).Length - 1;
+        //        var row = new List<object> { relativePath, level, fileNameOnly, sheetName };
+
+        //        foreach (var addr in targetCells)
+        //        {
+        //            object value = "";
+        //            try
+        //            {
+        //                int col = ColLetterToIndex(GetColumnLetters(addr));
+        //                int r = GetRowNumber(addr) - 1;
+        //                if (r >= 0 && r < sheetData.Count)
+        //                {
+        //                    var line = sheetData[r];
+        //                    if (col >= 0 && col < line.Length)
+        //                        value = line[col] ?? "";
+        //                }
+        //            }
+        //            catch { }
+        //            row.Add(value);
+        //        }
+
+        //        results.Add(row);
+
+        //    } while (reader.NextResult());
+        //}
+
+        // === Универсальное чтение Excel через ExcelDataReader ===
+        private bool ReadExcelFile(string file, string sheetNameFilter, List<string> targetCells, string rootFolder, List<List<object>> results)
         {
+            bool sheetFound = false;
+
             using var stream = File.Open(file, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
             using var reader = ExcelReaderFactory.CreateReader(stream);
 
@@ -278,6 +333,8 @@ namespace ExcelScannerWinForms
                 if (!string.IsNullOrEmpty(sheetNameFilter) &&
                     !sheetName.Equals(sheetNameFilter, StringComparison.OrdinalIgnoreCase))
                     continue;
+
+                sheetFound = true; // нашли нужный лист
 
                 var sheetData = new List<object[]>();
                 while (reader.Read())
@@ -290,8 +347,9 @@ namespace ExcelScannerWinForms
                 string relativePath = Path.GetRelativePath(rootFolder, file);
                 string fileNameOnly = Path.GetFileNameWithoutExtension(file);
                 int level = relativePath.Split(Path.DirectorySeparatorChar).Length - 1;
-                var row = new List<object> { relativePath, level, fileNameOnly, sheetName };
 
+                // Пробегаем все целевые ячейки
+                var row = new List<object> { relativePath, level, fileNameOnly, sheetName };
                 foreach (var addr in targetCells)
                 {
                     object value = "";
@@ -310,10 +368,15 @@ namespace ExcelScannerWinForms
                     row.Add(value);
                 }
 
-                results.Add(row);
+                // Если хотя бы одна ячейка не пустая — добавляем строку
+                if (row.Skip(4).Any(v => v != null && v.ToString() != ""))
+                    results.Add(row);
 
             } while (reader.NextResult());
+
+            return sheetFound;
         }
+
 
         private void WriteSheet(IXLWorksheet ws, List<List<object>> data)
         {
@@ -323,9 +386,9 @@ namespace ExcelScannerWinForms
                 {
                     object value = data[i][j];
                     if (value is double || value is int || value is decimal)
-                        ws.Cell(i + 1, j + 1).Value = Convert.ToDouble(value); // пишем как число
+                        ws.Cell(i + 1, j + 1).Value = Convert.ToDouble(value);
                     else if (value is DateTime dt)
-                        ws.Cell(i + 1, j + 1).Value = dt; // как дата
+                        ws.Cell(i + 1, j + 1).Value = dt;
                     else
                         ws.Cell(i + 1, j + 1).Value = value?.ToString() ?? "";
                 }

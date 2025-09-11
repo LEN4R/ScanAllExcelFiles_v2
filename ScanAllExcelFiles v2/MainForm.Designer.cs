@@ -83,7 +83,7 @@
             this.btnBrowse.Click += new System.EventHandler(this.btnBrowse_Click);
 
             // Лист
-            this.lblSheet.Text = "Введите название листа (оставьте пустым для всех):";
+            this.lblSheet.Text = "Введите название листа (оставьте пустым для всех листов):";
             this.lblSheet.AutoSize = true;
             this.lblSheet.Location = new System.Drawing.Point(margin, this.txtFolder.Bottom + 10);
 
