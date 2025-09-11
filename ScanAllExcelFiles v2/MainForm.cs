@@ -97,13 +97,13 @@ namespace ExcelScannerWinForms
             {
                 try
                 {
-                    var results = new List<List<string>>();
-                    var errors = new List<List<string>>();
+                    var results = new List<List<object>>();
+                    var errors = new List<List<object>>();
 
-                    var header = new List<string> { "Файл (относительный путь)", "Уровень папки", "Имя файла", "Имя листа" };
+                    var header = new List<object> { "Файл (относительный путь)", "Уровень папки", "Имя файла", "Имя листа" };
                     header.AddRange(targetCells);
                     results.Add(header);
-                    errors.Add(new List<string> { "Файл (относительный путь)", "Имя файла", "Описание ошибки" });
+                    errors.Add(new List<object> { "Файл (относительный путь)", "Имя файла", "Описание ошибки" });
 
                     int current = 0;
                     foreach (var file in excelFiles)
@@ -113,30 +113,26 @@ namespace ExcelScannerWinForms
 
                         if (Path.GetFileName(file).StartsWith("~$"))
                             continue;
-
                         try
                         {
-                            if (file.EndsWith(".xlsb", StringComparison.OrdinalIgnoreCase))
-                                ReadXlsbFile(file, sheetNameFilter, targetCells, rootFolder, results);
-                            else
-                                ReadXlsxFile(file, sheetNameFilter, targetCells, rootFolder, results);
+                            ReadExcelFile(file, sheetNameFilter, targetCells, rootFolder, results);
                         }
                         catch (HeaderException hex)
                         {
-                            errors.Add(new List<string>
+                            errors.Add(new List<object>
                             {
-                                Path.GetRelativePath(rootFolder, file),
-                                Path.GetFileName(file),
-                                $"Файл зашифрован или повреждён: {hex.Message}"
+                                    Path.GetRelativePath(rootFolder, file),
+                                    Path.GetFileName(file),
+                                    $"Файл зашифрован или повреждён: {hex.Message}"
                             });
                         }
                         catch (Exception ex)
                         {
-                            errors.Add(new List<string>
+                            errors.Add(new List<object>
                             {
-                                Path.GetRelativePath(rootFolder, file),
-                                Path.GetFileName(file),
-                                ex.Message
+                                    Path.GetRelativePath(rootFolder, file),
+                                    Path.GetFileName(file),
+                                    ex.Message
                             });
                         }
                     }
@@ -270,40 +266,12 @@ namespace ExcelScannerWinForms
             return result;
         }
 
-        // === Чтение XLSX/XLSB ===
-        private void ReadXlsxFile(string file, string sheetNameFilter, List<string> targetCells, string rootFolder, List<List<string>> results)
-        {
-            using var stream = new FileStream(file, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
-            using var workbook = new XLWorkbook(stream);
-            var sheetsToScan = string.IsNullOrEmpty(sheetNameFilter)
-                ? workbook.Worksheets.ToList()
-                : workbook.Worksheets.Where(s => s.Name.Equals(sheetNameFilter, StringComparison.OrdinalIgnoreCase)).ToList();
-
-            if (!sheetsToScan.Any())
-                throw new Exception($"Лист '{sheetNameFilter}' не найден в {Path.GetFileName(file)}");
-
-            foreach (var ws in sheetsToScan)
-            {
-                string relativePath = Path.GetRelativePath(rootFolder, file);
-                string fileNameOnly = Path.GetFileNameWithoutExtension(file);
-                int level = relativePath.Split(Path.DirectorySeparatorChar).Length - 1;
-                var row = new List<string> { relativePath, level.ToString(), fileNameOnly, ws.Name };
-
-                foreach (var addr in targetCells)
-                {
-                    string value;
-                    try { value = ws.Cell(addr).GetFormattedString(); }
-                    catch { value = ""; }
-                    row.Add(value);
-                }
-                results.Add(row);
-            }
-        }
-
-        private void ReadXlsbFile(string file, string sheetNameFilter, List<string> targetCells, string rootFolder, List<List<string>> results)
+        // === Чтение Excel ===
+        private void ReadExcelFile(string file, string sheetNameFilter, List<string> targetCells, string rootFolder, List<List<object>> results)
         {
             using var stream = File.Open(file, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
             using var reader = ExcelReaderFactory.CreateReader(stream);
+
             do
             {
                 string sheetName = reader.Name ?? $"Лист{Guid.NewGuid()}";
@@ -322,11 +290,11 @@ namespace ExcelScannerWinForms
                 string relativePath = Path.GetRelativePath(rootFolder, file);
                 string fileNameOnly = Path.GetFileNameWithoutExtension(file);
                 int level = relativePath.Split(Path.DirectorySeparatorChar).Length - 1;
-                var row = new List<string> { relativePath, level.ToString(), fileNameOnly, sheetName };
+                var row = new List<object> { relativePath, level, fileNameOnly, sheetName };
 
                 foreach (var addr in targetCells)
                 {
-                    string value = "";
+                    object value = "";
                     try
                     {
                         int col = ColLetterToIndex(GetColumnLetters(addr));
@@ -335,7 +303,7 @@ namespace ExcelScannerWinForms
                         {
                             var line = sheetData[r];
                             if (col >= 0 && col < line.Length)
-                                value = line[col]?.ToString() ?? "";
+                                value = line[col] ?? "";
                         }
                     }
                     catch { }
@@ -347,11 +315,21 @@ namespace ExcelScannerWinForms
             } while (reader.NextResult());
         }
 
-        private void WriteSheet(IXLWorksheet ws, List<List<string>> data)
+        private void WriteSheet(IXLWorksheet ws, List<List<object>> data)
         {
             for (int i = 0; i < data.Count; i++)
+            {
                 for (int j = 0; j < data[i].Count; j++)
-                    ws.Cell(i + 1, j + 1).Value = data[i][j];
+                {
+                    object value = data[i][j];
+                    if (value is double || value is int || value is decimal)
+                        ws.Cell(i + 1, j + 1).Value = Convert.ToDouble(value); // пишем как число
+                    else if (value is DateTime dt)
+                        ws.Cell(i + 1, j + 1).Value = dt; // как дата
+                    else
+                        ws.Cell(i + 1, j + 1).Value = value?.ToString() ?? "";
+                }
+            }
 
             ws.Row(1).Style.Font.Bold = true;
             ws.Columns().AdjustToContents();
